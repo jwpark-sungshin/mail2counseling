@@ -12,6 +12,8 @@ import pandas as pd
 from datetime import datetime
 import json
 
+PERIOD = 'after:2024/12/28 before:2025/01/01'
+
 # Gmail API SCOPES
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
@@ -171,7 +173,7 @@ if __name__ == "__main__":
     service = authenticate_gmail()
 
     # 2024년 동안 주고받은 대화 가져오기
-    query = 'after:2024/12/30 before:2025/01/01'
+    query = PERIOD
     threads = get_threads(service, query)
 
     results = []

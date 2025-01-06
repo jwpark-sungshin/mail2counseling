@@ -237,4 +237,4 @@ if __name__ == "__main__":
             print(f"학생 여부 == 아니오")
 
     # 기존 input.xlsx 파일을 수정하여 저장
-    save_to_custom_excel(results, 'input.xlsx', 'output.xlsx')
+    save_to_custom_excel(results, 'template.xlsx', 'output.xlsx')

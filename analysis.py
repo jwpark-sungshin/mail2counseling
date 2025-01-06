@@ -70,11 +70,13 @@ def get_thread_messages(service, thread_id):
 # 4. ChatGPT를 사용하여 대화 단위 분석
 def analyze_thread_with_chatgpt(thread_body):
     client = OpenAI()
-    prompt = f"""아래는 이메일 대화 내용이야. 이 대화가 학생과의 상담이나 질의응답인지 판단하고, 맞다면 상담 요청 내용 또는 질문과 그에 대한 나의 답변을 요약하여 JSON 형식으로 반환해줘. 요약은 음슴체로 작성해줘.
+    prompt = f"""나는 컴퓨터공학과 박지웅 교수야. 아래는 이메일 대화 내용이야. 이 대화가 학생과의 대화인지 판단해서 예 또는 아니오로 대답해줘. 내가 학생이라는 호칭을 사용해야 학생이야. XXX 학생이라는 내용이 있을 경우에만 학생과의 대화로 인정해줘. 학생이 맞다면 상담 요청 내용 또는 질문과 그에 대한 나의 답변을 요약해줘. 요약은 음슴체로 작성해줘. 각각의 요약은 400자 이내로 작성해줘. 학과 정보나, 학번 정보가 없다면 빈칸으로 남겨줘. 학번은 보통 8자리 숫자야. 상담유형은 학업, 전공, 장학금, 진로, 생활, 멘토링 장학금, 수강, 성적, 입학, 진학, 창업, 사회봉사, 건강, 학술활동, 논문, 입학사정관, 취업, 대외활동, 교환학생, 현장실습 중 가장 적절한 것을 골라줘. 아래 내용을 json 형태로 반환해줘.
 - 학생 여부: 예/아니오
-- 상담요청 내용 또는 질문
 - 학과
 - 학번
+- 이름
+- 상담유형
+- 상담요청 내용 또는 질문
 - 답변
 
 이메일 대화:
@@ -145,10 +147,6 @@ def save_to_custom_excel(data, input_file, output_file):
         else:
             reply_year = reply_month = reply_date = start_hour = start_min = end_hour = end_min = ""
 
-        # 요약된 요청과 의견
-        request_summary = (record.get('상담요청 내용 또는 질문', '')[:500]).strip()
-        opinion_summary = (record.get('답변', '')[:500]).strip()  # 상담 내용 요약
-
         # 데이터 입력
         sheet.append([
             reply_year, reply_month, reply_date,  # year, month, date
@@ -157,10 +155,10 @@ def save_to_custom_excel(data, input_file, output_file):
             record.get('학과(전공)', ''),         # Major
             record.get('학번', ''),              # ID
             record.get('이름', ''),              # name
-            request_summary,                     # request
-            "진로",                               # purpose
+            record.get('상담요청 내용 또는 질문', ''), # request
+            record.get('상담유형', ''),           # purpose
             "이메일",                             # type
-            opinion_summary                      # opinion
+            record.get('답변', '')                # opinion
         ])
 
     # 새로운 파일로 저장
@@ -200,6 +198,7 @@ if __name__ == "__main__":
 
         # 학생 여부 확인
         if parsed_result.get('학생 여부') == "예":
+
             # 예시 답장 날짜 설정 (임의로 첫 메시지 날짜 사용)
             try:
                 thread_detail = service.users().threads().get(userId='me', id=thread_id).execute()
@@ -212,6 +211,8 @@ if __name__ == "__main__":
                 if not date_header:
                     raise ValueError("Date header not found.")
                 date_obj = email.utils.parsedate_to_datetime(date_header)
+                
+                print(parsed_result)
 
                 # 정리된 결과 저장
                 results.append({
@@ -223,12 +224,15 @@ if __name__ == "__main__":
                     '학과(전공)': parsed_result.get('학과', ''),
                     '학번': parsed_result.get('학번', ''),
                     '이름': parsed_result.get('이름', ''),
-                    '질문 또는 요청사항': parsed_result.get('상담요청 내용 또는 질문', ''),
-                    '상담 내용': parsed_result.get('답변', '')  # 상담 내용 저장
+                    '상담요청 내용 또는 질문': parsed_result.get('상담요청 내용 또는 질문', ''),
+                    '상담유형': parsed_result.get('상담유형', ''),
+                    '답변': parsed_result.get('답변', '')  # 상담 내용 저장
                 })
             except Exception as e:
                 print(f"Error extracting date for thread: {thread}")
                 continue
+        else:
+            print(f"학생 여부 == 아니오")
 
     # 기존 input.xlsx 파일을 수정하여 저장
     save_to_custom_excel(results, 'input.xlsx', 'output.xlsx')

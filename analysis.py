@@ -12,38 +12,64 @@ from openai import OpenAI
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-# =========================
-# 사용자 설정
-# =========================
-PERIOD = "after:2025/01/01 before:2025/12/31"  # Gmail period 필터에 의존
+
+# ======================================================
+# 설정
+# ======================================================
+PERIOD = "after:2025/01/01 before:2025/12/31"
 LABEL_NAME = "student"
 PROF_EMAIL = "jwpark12@sungshin.ac.kr"
 
 TEMPLATE_XLSX = "counsel_excelupload.xlsx"
 OUTPUT_XLSX = "output.xlsx"
 
-# ✅ GPT-5 계열 (권한 있어야 함)
-PRIMARY_MODEL = "gpt-5-nano"
-FALLBACK_MODEL = "gpt-5-mini"  # 없으면 None으로
+# ✅ mini 기본
+PRIMARY_MODEL = "gpt-5-mini"
+FALLBACK_MODEL = "gpt-5-nano"
 
-# 병렬 처리 개수 (레이트리밋/안정성 고려해 4 추천)
 MAX_WORKERS = 4
-
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-VALID_CODES = {
-    "CF01", "CF02", "CF03", "CF04", "CF05", "CF06", "CF07", "CF08", "CF09",
-    "CF10", "CF11", "CF12", "CF13", "CF14", "CF15", "CF16", "CF17", "CF18",
-    "CF19", "CF22", "CF23", "CF24", "CF25",
-}
+COUNSEL_TYPE_DEFAULT = "3"  # 상담형태 기본값(텍스트): 이메일 = "3"
+PUBLIC_YN_DEFAULT = "Y"
 
-# =========================
-# Gmail 인증/조회
-# =========================
+# 명칭-코드 매핑(사용자 제공)
+CF_CATEGORIES = {
+    "학업": "CF01",
+    "전공": "CF02",
+    "장학금": "CF03",
+    "진로": "CF04",
+    "생활": "CF05",
+    "휴학": "CF06",
+    "자퇴": "CF07",
+    "기타": "CF08",
+    "멘토링 장학금": "CF09",
+    "수강": "CF10",
+    "성적": "CF11",
+    "입학": "CF12",
+    "진학": "CF13",
+    "창업": "CF14",
+    "사회봉사": "CF15",
+    "건강": "CF16",
+    "학술활동": "CF17",
+    "논문": "CF18",
+    "입학사정관": "CF19",
+    "취업": "CF22",
+    "대외활동": "CF23",
+    "교환학생": "CF24",
+    "현장실습": "CF25",
+}
+VALID_CODES = set(CF_CATEGORIES.values())
+
+
+# ======================================================
+# Gmail
+# ======================================================
 def authenticate_gmail():
     flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
     creds = flow.run_local_server(port=0)
     return build("gmail", "v1", credentials=creds)
+
 
 def get_threads(service, label_name: str, period: str) -> List[Dict[str, Any]]:
     query = f"label:{label_name} {period}"
@@ -58,9 +84,10 @@ def get_threads(service, label_name: str, period: str) -> List[Dict[str, Any]]:
         threads.extend(resp.get("threads", []))
     return threads
 
-# =========================
-# 본문 추출
-# =========================
+
+# ======================================================
+# 메시지 파싱
+# ======================================================
 def _extract_plain_text_from_payload(payload: Dict[str, Any]) -> str:
     def decode(data: str) -> str:
         try:
@@ -71,80 +98,93 @@ def _extract_plain_text_from_payload(payload: Dict[str, Any]) -> str:
     if "data" in payload.get("body", {}):
         return decode(payload["body"]["data"])
 
-    parts = payload.get("parts", [])
-    for part in parts:
+    for part in payload.get("parts", []):
         if part.get("mimeType") == "text/plain" and "data" in part.get("body", {}):
             return decode(part["body"]["data"])
-
-    for part in parts:
         if part.get("parts"):
             nested = _extract_plain_text_from_payload(part)
             if nested.strip():
                 return nested
 
-    for part in parts:
+    for part in payload.get("parts", []):
         if part.get("mimeType") == "text/html" and "data" in part.get("body", {}):
             return decode(part["body"]["data"])
 
     return ""
 
+
 def get_thread_messages(service, thread_id: str) -> Tuple[str, List[Dict[str, Any]]]:
-    thread = service.users().threads().get(
-        userId="me", id=thread_id, format="full"
-    ).execute()
+    thread = service.users().threads().get(userId="me", id=thread_id, format="full").execute()
     messages = thread.get("messages", [])
 
     subject = ""
     if messages:
-        for h in messages[0].get("payload", {}).get("headers", []):
-            if h.get("name") == "Subject":
-                subject = h.get("value", "")
+        for h in messages[0]["payload"]["headers"]:
+            if h["name"] == "Subject":
+                subject = h["value"]
                 break
 
     out: List[Dict[str, Any]] = []
     for m in messages:
-        headers = {
-            h["name"].lower(): h.get("value", "")
-            for h in m.get("payload", {}).get("headers", [])
-            if "name" in h
-        }
-        body = _extract_plain_text_from_payload(m.get("payload", {})).strip()
+        headers = {h["name"].lower(): h["value"] for h in m["payload"]["headers"]}
+        body = _extract_plain_text_from_payload(m["payload"]).strip()
 
         out.append({
-            "internal_ms": int(m.get("internalDate", "0")),
+            "internal_ms": int(m["internalDate"]),
             "from": headers.get("from", ""),
-            "to": headers.get("to", ""),
-            "cc": headers.get("cc", ""),
             "body": body,
         })
 
-    # 시간순 정렬
     out.sort(key=lambda x: x["internal_ms"])
     for i, msg in enumerate(out):
         msg["idx"] = i
 
     return subject, out
 
+
 def is_prof_message(from_header: str) -> bool:
     return PROF_EMAIL.lower() in (from_header or "").lower()
 
+
 def ms_to_kst(ms: int) -> datetime:
-    kst = timezone(timedelta(hours=9))
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(kst)
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(
+        timezone(timedelta(hours=9))
+    )
 
-# =========================
-# OpenAI 호출/파싱 (nano -> mini fallback)
-# =========================
-def _clean_json_block(text: str) -> str:
-    t = text.strip()
-    if t.startswith("```json"):
-        t = t[7:].strip()
-    if t.startswith("```"):
-        t = t[3:].strip()
-    if t.endswith("```"):
-        t = t[:-3].strip()
-    return t
 
+# ======================================================
+# 학번 추출: 이메일 우선, LLM 후순위 (둘 중 하나만 성공해도 사용)
+# ======================================================
+EMAIL_RE = re.compile(r"([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})", re.I)
+
+
+def _extract_email_addr(from_header: str) -> str:
+    if not from_header:
+        return ""
+    m = EMAIL_RE.search(from_header)
+    return (m.group(1) if m else from_header).strip().lower()
+
+
+def extract_student_id_from_email(from_header: str) -> str:
+    """
+    @sungshin.ac.kr 메일의 로컬파트가 8자리 숫자면 학번으로 간주
+    From 예: "홍길동 <20201234@sungshin.ac.kr>" / "20201234@sungshin.ac.kr"
+    """
+    addr = _extract_email_addr(from_header)
+    if not addr.endswith("@sungshin.ac.kr"):
+        return ""
+    local = addr.split("@", 1)[0].strip()
+    return local if re.fullmatch(r"\d{8}", local) else ""
+
+
+def normalize_student_id_from_llm(student_id: Any) -> str:
+    sid = "" if student_id is None else str(student_id).strip()
+    return sid if re.fullmatch(r"\d{8}", sid) else ""
+
+
+# ======================================================
+# OpenAI
+# ======================================================
 def call_llm_json(client: OpenAI, prompt: str) -> Dict[str, Any]:
     last_err: Optional[Exception] = None
     for model in [PRIMARY_MODEL, FALLBACK_MODEL]:
@@ -158,197 +198,219 @@ def call_llm_json(client: OpenAI, prompt: str) -> Dict[str, Any]:
             )
             content = (resp.choices[0].message.content or "").strip()
             if not content:
-                raise ValueError("빈 응답")
-            return json.loads(_clean_json_block(content))
+                raise ValueError("empty response")
+            return json.loads(content)
         except Exception as e:
             last_err = e
             continue
-    raise RuntimeError(f"LLM 호출 실패: {last_err}")
+    raise RuntimeError(f"LLM call failed: {last_err}")
 
-# =========================
-# 요약 검증(후처리 호출 제거: 위반이면 스킵)
-# =========================
+
+# ======================================================
+# 요약 검증 (후처리 LLM 재작성 없음: 위반이면 스킵)
+# ======================================================
 BAD_PATTERNS = [
-    r"합니다", r"드립니다", r"입니다", r"하세요", r"했습니다", r"하셨다", r"부탁", r"감사",
-    r"감사합니다", r"부탁드립니다",
+    r"합니다", r"드립니다", r"입니다", r"하세요", r"했습니다", r"하셨다",
+    r"부탁", r"감사", r"감사합니다", r"부탁드립니다",
+    r"하고자", r"하였다", r"했다", r"하라",
 ]
 
 def is_bad_summary(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return True
-    if any(re.search(p, t) for p in BAD_PATTERNS):
+    if len(t) > 240:
         return True
-    if len(t) > 220:
-        return True
-    return False
+    return any(re.search(p, t) for p in BAD_PATTERNS)
 
-# =========================
-# 프롬프트 (1스레드 = 1건)
-# =========================
-def build_one_record_prompt(subject: str, msgs: List[Dict[str, Any]]) -> str:
-    parts: List[str] = []
+
+# ======================================================
+# 프롬프트 (학생-교수 상담 검증 + 1스레드=1건)
+# ======================================================
+def build_prompt(subject: str, msgs: List[Dict[str, Any]]) -> str:
+    blocks = []
     for m in msgs:
         role = "PROF" if is_prof_message(m["from"]) else "OTHER"
-        dt = ms_to_kst(m["internal_ms"]).strftime("%Y-%m-%d %H:%M:%S")
+        dt = ms_to_kst(m["internal_ms"]).strftime("%Y-%m-%d %H:%M")
         body = (m.get("body") or "").strip()
         if not body:
             continue
-        parts.append(
-            f"[{m['idx']}] ({dt}) {role}\nFROM: {m['from']}\nBODY:\n{body}\n"
-        )
-    joined = "\n---\n".join(parts)
+        blocks.append(f"[{m['idx']}] {dt} {role}\nFROM: {m['from']}\n{body}")
+
+    joined = "\n---\n".join(blocks)
+    cf_lines = "\n".join([f"- {name}: {code}" for name, code in CF_CATEGORIES.items()])
 
     return f"""
 너는 '학생 이메일 상담 기록'을 엑셀로 정리하는 도우미다.
-이 스레드는 "상담 1건"으로만 처리한다(주제 여러 개여도 한 건으로 묶음).
+
+[1] 먼저 이 스레드가 "학생 1명 ↔ 교수({PROF_EMAIL})" 상담 대화인지 판정하라.
+- 학생은 보통 상담/질문/요청을 하고, 교수는 답변/안내를 하는 형태임
+- 단순 공지, 행정담당/조교/시스템 알림, 외부 업체 메일이면 학생 상담 아님
+- 확신이 없으면 학생 상담 아님(false)
+
+[2] 학생 상담이 맞다면 이 스레드는 "상담 1건"으로만 요약하라(주제 여러 개여도 1건).
 
 [필수 조건]
-- 교수({PROF_EMAIL})가 보낸 답장 메시지가 반드시 있어야 함. 없으면 item 생성 금지.
+- 교수 메시지(답변)와 학생 메시지(질문/요청) 둘 다 존재해야 함
+- 교수 답변이 없거나 학생 메시지가 없으면 is_student_thread=false
 
 [요약 규칙]
-- student_request_summary / prof_reply_summary는 각각 2문장 이내로 매우 짧게 작성.
-- 반드시 음슴체만 사용(~함/~됨/~요청함/~문의함/~안내함/~원함/~필요함/~받고싶음).
-- 아래 표현이 하나라도 나오면 실패: 합니다, 드립니다, 입니다, 하세요, 했습니다, 하셨다, 부탁, 감사
-- 인사/감사/서명/링크/원문 복붙 금지. 핵심만 재서술.
+- 반드시 음슴체만 사용
+- student_request_summary / prof_reply_summary 각각 2문장 이내
+- 아래 표현 포함 금지: 합니다, 드립니다, 입니다, 하세요, 했습니다, 하셨다, 부탁, 감사, 했다, 하였다, 하고자, 하라
+- 인사/감사/서명/링크/원문 복붙 금지, 핵심만 재서술
 
-[상담유형]
-- 아래 CF코드 중 하나로 category_code를 선택. 모르면 CF08.
-{", ".join(sorted(list(VALID_CODES)))}
+[상담유형 분류(명칭-코드)]
+{cf_lines}
+
+category_code 규칙:
+- 위 목록의 코드 중 하나만 선택해서 반환
+- 애매하면 기타(CF08)
 
 반환 JSON(반드시 정확히):
 {{
+  "is_student_thread": true/false,
   "item": {{
-    "student_name": "홍길동",        // 성명 없으면 null
-    "student_id": "20231234",       // 8자리 없으면 ""
+    "student_name": "홍길동",                // 없으면 ""
+    "student_id": "20231234",               // 8자리 없으면 ""
     "category_code": "CF10",
-    "student_request_summary": "....",
-    "prof_reply_summary": "...."
+    "student_request_summary": "...",
+    "prof_reply_summary": "..."
   }}
 }}
 
-스레드 제목: {subject}
+제목: {subject}
 
 메시지들:
 {joined}
 """.strip()
 
-# =========================
-# 시간 반올림(30분)
-# =========================
-def round_to_nearest_30_minutes(dt: datetime) -> datetime:
+
+# ======================================================
+# 시간 계산
+# ======================================================
+def round_30(dt: datetime) -> datetime:
     total = dt.hour * 60 + dt.minute
     rounded = 30 * round(total / 30)
-    hour = (rounded // 60) % 24
-    minute2 = rounded % 60
-    return dt.replace(hour=hour, minute=minute2, second=0, microsecond=0)
+    return dt.replace(
+        hour=(rounded // 60) % 24,
+        minute=rounded % 60,
+        second=0,
+        microsecond=0,
+    )
 
-# =========================
+
+# ======================================================
 # 엑셀 저장
-# =========================
-def save_to_excel(records: List[Dict[str, Any]], template_xlsx: str, output_xlsx: str):
-    wb = openpyxl.load_workbook(template_xlsx)
-    ws = wb["Sheet1"]
+# ======================================================
+def save_to_excel(records: List[Dict[str, Any]]):
+    wb = openpyxl.load_workbook(TEMPLATE_XLSX)
+    ws = wb.active
 
     for r in records:
         ws.append([
-            r.get("학번", ""),              # 학번(빈칸 허용)
-            r.get("성명", ""),              # 성명(필수)
-            "이메일",                       # 상담형태(고정)
-            r.get("상담일", ""),            # YYYY-MM-DD
-            r.get("상담시작시간", ""),      # HH:MM
-            r.get("상담종료시간", ""),      # HH:MM
-            r.get("상담유형", "CF08"),      # CF코드
-            "",                             # 장소(비필수)
-            r.get("학생상담신청내용", ""),   # 요약
-            r.get("교수답변내용", ""),       # 요약(필수)
-            "Y",                            # 공개여부(고정)
+            r.get("학번", ""),                 # 학번(빈칸 허용)
+            r.get("성명", ""),                 # 성명(필수)
+            COUNSEL_TYPE_DEFAULT,              # 상담형태 기본값 "3"(텍스트)
+            r.get("상담일", ""),
+            r.get("상담시작시간", ""),
+            r.get("상담종료시간", ""),
+            r.get("상담유형", "CF08"),
+            "",                                 # 장소(비필수)
+            r.get("학생상담신청내용", ""),
+            r.get("교수답변내용", ""),
+            PUBLIC_YN_DEFAULT,                  # "Y"
         ])
 
-    wb.save(output_xlsx)
-    print(f"[OK] Saved: {output_xlsx}")
+    wb.save(OUTPUT_XLSX)
+    print(f"[OK] Saved: {OUTPUT_XLSX}")
 
-# =========================
-# 스레드 1개 처리 (병렬 작업 단위)
-# =========================
-def process_one_thread(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    task keys: i, total, subject, msgs, short_subject
-    return: record dict or None
-    """
+
+# ======================================================
+# 스레드 처리 (병렬 작업 단위)
+# ======================================================
+def process_thread(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     subject = task["subject"]
     msgs = task["msgs"]
 
-    # 교수 메시지(본문 있는 것) 없으면 제외(LLM 호출도 안 함)
-    prof_msgs = [
-        m for m in msgs
-        if is_prof_message(m.get("from", "")) and (m.get("body") or "").strip()
-    ]
+    # (A) 교수 메시지 존재 확인 (답변 기준 시간 산정용)
+    prof_msgs = [m for m in msgs if is_prof_message(m["from"]) and (m.get("body") or "").strip()]
     if not prof_msgs:
         return None
 
-    # 상담 시간 기준: "가장 이른 교수 답장"을 대표로 사용
-    rep_msg = min(prof_msgs, key=lambda x: x["internal_ms"])
-    rep_dt = ms_to_kst(rep_msg["internal_ms"])
-    start_dt = round_to_nearest_30_minutes(rep_dt)
-    end_dt = start_dt + timedelta(minutes=30)
+    # (B) 학생 메시지 존재 확인: 교수 아닌 발신자의 본문 메시지 최소 1개
+    student_msgs = [m for m in msgs if (not is_prof_message(m["from"])) and (m.get("body") or "").strip()]
+    if not student_msgs:
+        return None  # 학생 미참여(교수만 보냄) 제외
 
-    # 스레드별로 클라이언트 생성(스레드 세이프 이슈 회피)
+    # 상담시간: "가장 이른 교수 답장" 기준
+    rep = min(prof_msgs, key=lambda x: x["internal_ms"])
+    start = round_30(ms_to_kst(rep["internal_ms"]))
+    end = start + timedelta(minutes=30)
+
+    # 학번: 이메일 우선(학생 메시지 발신자에서)
+    sid_email = ""
+    for m in student_msgs:
+        sid_email = extract_student_id_from_email(m["from"])
+        if sid_email:
+            break
+
     client = OpenAI()
+    result = call_llm_json(client, build_prompt(subject, msgs))
 
-    prompt = build_one_record_prompt(subject, msgs)
-    result = call_llm_json(client, prompt)
+    # (C) 라벨 오지정 검증: 학생 상담 아니면 제외
+    if not bool(result.get("is_student_thread")):
+        return None
 
     item = result.get("item")
     if not isinstance(item, dict):
         return None
 
-    name = item.get("student_name")
-    if not name or not str(name).strip():
-        return None  # 성명 없으면 제외
+    name = str(item.get("student_name", "")).strip()
+    if not name:
+        return None  # 이름 없으면 제외(요구사항)
+
+    # 학번: 이메일이 최우선, 없으면 LLM값 사용(둘 중 하나만 성공해도 활용)
+    sid_llm = normalize_student_id_from_llm(item.get("student_id", ""))
+    sid = sid_email if sid_email else sid_llm
 
     student_sum = str(item.get("student_request_summary", "")).strip()
     prof_sum = str(item.get("prof_reply_summary", "")).strip()
 
-    # 후처리 재작성 없음: 규칙 위반이면 그냥 스킵
     if is_bad_summary(student_sum) or is_bad_summary(prof_sum):
         return None
     if not prof_sum:
-        return None  # 답변 없으면 상담 아님
+        return None  # 답변 없으면 상담 아님(요구사항)
 
     code = str(item.get("category_code", "CF08")).strip()
     if code not in VALID_CODES:
         code = "CF08"
 
-    sid = item.get("student_id", "")
-    sid = "" if sid is None else str(sid).strip()
-
     return {
         "학번": sid,
-        "성명": str(name).strip(),
-        "상담일": start_dt.strftime("%Y-%m-%d"),
-        "상담시작시간": start_dt.strftime("%H:%M"),
-        "상담종료시간": end_dt.strftime("%H:%M"),
+        "성명": name,
+        "상담일": start.strftime("%Y-%m-%d"),
+        "상담시작시간": start.strftime("%H:%M"),
+        "상담종료시간": end.strftime("%H:%M"),
         "상담유형": code,
         "학생상담신청내용": student_sum,
         "교수답변내용": prof_sum,
     }
 
-# =========================
-# 메인
-# =========================
+
+# ======================================================
+# 메인 + 진행 로그
+# ======================================================
 def main():
     service = authenticate_gmail()
     threads = get_threads(service, LABEL_NAME, PERIOD)
     total = len(threads)
     print(f"[INFO] threads matched query: {total}")
 
-    # 1) Gmail에서 스레드 메시지를 먼저 모음
+    # 1) Gmail에서 스레드 메시지 수집 (진행 로그)
     prepared: List[Dict[str, Any]] = []
-    for i, t in enumerate(threads, start=1):
-        thread_id = t["id"]
-        subject, msgs = get_thread_messages(service, thread_id)
-
+    for i, t in enumerate(threads, 1):
+        subject, msgs = get_thread_messages(service, t["id"])
         short_subject = (subject or "").strip()
         if len(short_subject) > 60:
             short_subject = short_subject[:60] + "..."
@@ -360,13 +422,13 @@ def main():
             "i": i,
             "total": total,
             "subject": subject or "",
-            "msgs": msgs,
             "short_subject": short_subject,
+            "msgs": msgs,
         })
 
     print(f"[INFO] fetched threads: {len(prepared)}. start LLM with {MAX_WORKERS} workers")
 
-    # 2) LLM 병렬 처리
+    # 2) 병렬 처리 + 진행 로그
     records: List[Dict[str, Any]] = []
     lock = threading.Lock()
     done_count = 0
@@ -376,10 +438,10 @@ def main():
             print(msg)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        future_map = {ex.submit(process_one_thread, task): task for task in prepared}
+        futures = {ex.submit(process_thread, task): task for task in prepared}
 
-        for fut in as_completed(future_map):
-            task = future_map[fut]
+        for fut in as_completed(futures):
+            task = futures[fut]
             i = task["i"]
             short_subject = task["short_subject"]
 
@@ -397,8 +459,10 @@ def main():
                 log(f"[PROGRESS] done {done_count}/{total}, rows={len(records)}")
 
     # 3) 엑셀 저장
-    save_to_excel(records, TEMPLATE_XLSX, OUTPUT_XLSX)
+    save_to_excel(records)
     print(f"[DONE] rows appended: {len(records)}")
+
 
 if __name__ == "__main__":
     main()
+

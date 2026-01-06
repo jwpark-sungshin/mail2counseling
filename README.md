@@ -100,14 +100,24 @@ mail2counseling/
 즉, 라벨은 *대략적인 후보 추리기* 용도로만 사용됩니다.
    
 
-### 2️⃣ Python
+### 2️⃣ 저장소 클론
+
+먼저 이 저장소를 로컬 환경으로 복사합니다.
+
+```bash
+git clone https://github.com/jwpark-sungshin/mail2counseling.git
+cd mail2counseling
+```
+
+
+### 3️⃣ Python
 
 Python 3.10 이상 권장
 
     python --version
 
 
-### 3️⃣ 필수 패키지 설치
+### 4️⃣ 필수 패키지 설치
 
 가상환경 사용을 권장합니다.
 

@@ -6,69 +6,133 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+import os
+import argparse
+import sys
 
 import openpyxl
 from openai import OpenAI
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 
 
 # ======================================================
 # 설정
 # ======================================================
-PERIOD = "after:2025/01/01 before:2025/12/31"
+PERIOD = ""
 LABEL_NAME = "student"
-PROF_EMAIL = "jwpark12@sungshin.ac.kr"
+PROF_EMAIL = ""
 
 TEMPLATE_XLSX = "counsel_excelupload.xlsx"
 OUTPUT_XLSX = "output.xlsx"
 
-# ✅ mini 기본
-PRIMARY_MODEL = "gpt-5-mini"
-FALLBACK_MODEL = "gpt-5-nano"
+PRIMARY_MODEL = "gpt-5-mini"  # config/args로 덮어씀
 
 MAX_WORKERS = 4
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-COUNSEL_TYPE_DEFAULT = "3"  # 상담형태 기본값(텍스트): 이메일 = "3"
+COUNSEL_TYPE_DEFAULT = "3"
 PUBLIC_YN_DEFAULT = "Y"
 
-# 명칭-코드 매핑(사용자 제공)
 CF_CATEGORIES = {
-    "학업": "CF01",
-    "전공": "CF02",
-    "장학금": "CF03",
-    "진로": "CF04",
-    "생활": "CF05",
-    "휴학": "CF06",
-    "자퇴": "CF07",
-    "기타": "CF08",
-    "멘토링 장학금": "CF09",
-    "수강": "CF10",
-    "성적": "CF11",
-    "입학": "CF12",
-    "진학": "CF13",
-    "창업": "CF14",
-    "사회봉사": "CF15",
-    "건강": "CF16",
-    "학술활동": "CF17",
-    "논문": "CF18",
-    "입학사정관": "CF19",
-    "취업": "CF22",
-    "대외활동": "CF23",
-    "교환학생": "CF24",
-    "현장실습": "CF25",
+    "학업": "CF01", "전공": "CF02", "장학금": "CF03", "진로": "CF04",
+    "생활": "CF05", "휴학": "CF06", "자퇴": "CF07", "기타": "CF08",
+    "멘토링 장학금": "CF09", "수강": "CF10", "성적": "CF11",
+    "입학": "CF12", "진학": "CF13", "창업": "CF14", "사회봉사": "CF15",
+    "건강": "CF16", "학술활동": "CF17", "논문": "CF18", "입학사정관": "CF19",
+    "취업": "CF22", "대외활동": "CF23", "교환학생": "CF24", "현장실습": "CF25",
 }
 VALID_CODES = set(CF_CATEGORIES.values())
+
+
+# ======================================================
+# config.json
+# ======================================================
+BASE_DIR = Path(__file__).resolve().parent
+def _config_path() -> Path:
+    return BASE_DIR / "config.json"
+
+def load_config() -> Dict[str, Any]:
+    default_cfg = {
+        "label_name": "student",
+        "prof_email": "",
+        "openai_api_key": "",
+        "primary_model": "gpt-5-mini",
+    }
+
+    p = _config_path()
+    if not p.exists():
+        p.write_text(json.dumps(default_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        return default_cfg.copy()
+
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        p.write_text(json.dumps(default_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        return default_cfg.copy()
+
+    changed = False
+    for k, v in default_cfg.items():
+        if k not in cfg:
+            cfg[k] = v
+            changed = True
+
+    if changed:
+        p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return cfg
+
+def save_config(cfg: Dict[str, Any]) -> None:
+    _config_path().write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+# ======================================================
+# OpenAI 모델 유틸
+# ======================================================
+def get_available_models(api_key: str) -> List[str]:
+    client = OpenAI(api_key=api_key)
+    models = client.models.list()
+    return sorted(m.id for m in models.data)
+
+def print_available_models(api_key: str) -> None:
+    models = get_available_models(api_key)
+    print("[AVAILABLE MODELS]")
+    for m in models:
+        print(m)
 
 
 # ======================================================
 # Gmail
 # ======================================================
 def authenticate_gmail():
-    flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-    creds = flow.run_local_server(port=0)
-    return build("gmail", "v1", credentials=creds)
+    creds_path = BASE_DIR / "credentials.json"
+    token_path = BASE_DIR / "token.json"
+
+    if not creds_path.exists():
+        raise SystemExit(f"[ERROR] credentials.json 파일이 없습니다: {creds_path}")
+
+    creds: Optional[Credentials] = None
+    if token_path.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        except Exception:
+            creds = None
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
+            creds = flow.run_local_server(port=0)
+        token_path.write_text(creds.to_json(), encoding="utf-8")
+
+    return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
 def get_threads(service, label_name: str, period: str) -> List[Dict[str, Any]]:
@@ -153,10 +217,9 @@ def ms_to_kst(ms: int) -> datetime:
 
 
 # ======================================================
-# 학번 추출: 이메일 우선, LLM 후순위 (둘 중 하나만 성공해도 사용)
+# 학번 추출
 # ======================================================
 EMAIL_RE = re.compile(r"([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})", re.I)
-
 
 def _extract_email_addr(from_header: str) -> str:
     if not from_header:
@@ -164,18 +227,12 @@ def _extract_email_addr(from_header: str) -> str:
     m = EMAIL_RE.search(from_header)
     return (m.group(1) if m else from_header).strip().lower()
 
-
 def extract_student_id_from_email(from_header: str) -> str:
-    """
-    @sungshin.ac.kr 메일의 로컬파트가 8자리 숫자면 학번으로 간주
-    From 예: "홍길동 <20201234@sungshin.ac.kr>" / "20201234@sungshin.ac.kr"
-    """
     addr = _extract_email_addr(from_header)
     if not addr.endswith("@sungshin.ac.kr"):
         return ""
     local = addr.split("@", 1)[0].strip()
     return local if re.fullmatch(r"\d{8}", local) else ""
-
 
 def normalize_student_id_from_llm(student_id: Any) -> str:
     sid = "" if student_id is None else str(student_id).strip()
@@ -183,31 +240,22 @@ def normalize_student_id_from_llm(student_id: Any) -> str:
 
 
 # ======================================================
-# OpenAI
+# OpenAI 호출
 # ======================================================
 def call_llm_json(client: OpenAI, prompt: str) -> Dict[str, Any]:
-    last_err: Optional[Exception] = None
-    for model in [PRIMARY_MODEL, FALLBACK_MODEL]:
-        if not model:
-            continue
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-            )
-            content = (resp.choices[0].message.content or "").strip()
-            if not content:
-                raise ValueError("empty response")
-            return json.loads(content)
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"LLM call failed: {last_err}")
+    resp = client.chat.completions.create(
+        model=PRIMARY_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    content = (resp.choices[0].message.content or "").strip()
+    if not content:
+        raise RuntimeError("LLM empty response")
+    return json.loads(content)
 
 
 # ======================================================
-# 요약 검증 (후처리 LLM 재작성 없음: 위반이면 스킵)
+# 요약 검증
 # ======================================================
 BAD_PATTERNS = [
     r"합니다", r"드립니다", r"입니다", r"하세요", r"했습니다", r"하셨다",
@@ -225,17 +273,17 @@ def is_bad_summary(text: str) -> bool:
 
 
 # ======================================================
-# 프롬프트 (학생-교수 상담 검증 + 1스레드=1건)
+# 프롬프트
 # ======================================================
 def build_prompt(subject: str, msgs: List[Dict[str, Any]]) -> str:
     blocks = []
     for m in msgs:
         role = "PROF" if is_prof_message(m["from"]) else "OTHER"
-        dt = ms_to_kst(m["internal_ms"]).strftime("%Y-%m-%d %H:%M")
+        dt_ = ms_to_kst(m["internal_ms"]).strftime("%Y-%m-%d %H:%M")
         body = (m.get("body") or "").strip()
         if not body:
             continue
-        blocks.append(f"[{m['idx']}] {dt} {role}\nFROM: {m['from']}\n{body}")
+        blocks.append(f"[{m['idx']}] {dt_} {role}\nFROM: {m['from']}\n{body}")
 
     joined = "\n---\n".join(blocks)
     cf_lines = "\n".join([f"- {name}: {code}" for name, code in CF_CATEGORIES.items()])
@@ -246,7 +294,6 @@ def build_prompt(subject: str, msgs: List[Dict[str, Any]]) -> str:
 [1] 먼저 이 스레드가 "학생 1명 ↔ 교수({PROF_EMAIL})" 상담 대화인지 판정하라.
 - 학생은 보통 상담/질문/요청을 하고, 교수는 답변/안내를 하는 형태임
 - 단순 공지, 행정담당/조교/시스템 알림, 외부 업체 메일이면 학생 상담 아님
-- 확신이 없으면 학생 상담 아님(false)
 
 [2] 학생 상담이 맞다면 이 스레드는 "상담 1건"으로만 요약하라(주제 여러 개여도 1건).
 
@@ -260,6 +307,13 @@ def build_prompt(subject: str, msgs: List[Dict[str, Any]]) -> str:
 - 아래 표현 포함 금지: 합니다, 드립니다, 입니다, 하세요, 했습니다, 하셨다, 부탁, 감사, 했다, 하였다, 하고자, 하라
 - 인사/감사/서명/링크/원문 복붙 금지, 핵심만 재서술
 
+[교수답변 요약 스타일 규칙]
+- prof_reply_summary는 "교수 본인이 작성한 말"처럼 작성해야 함(1인칭/발화자 관점)
+- '교수는', '{PROF_EMAIL} 교수는', 'XXX 교수는' 같은 3인칭 표현 금지
+- '안내함/말함/설명함' 같은 서술자 표현도 금지
+- 예시(좋음): "수강변경은 수강정정기간에 처리 가능하다고 안내함. 필요 서류는 메일로 보내달라고 요청함"
+- 예시(나쁨): "교수는 수강정정기간에 처리 가능하다고 안내함"
+
 [상담유형 분류(명칭-코드)]
 {cf_lines}
 
@@ -271,8 +325,8 @@ category_code 규칙:
 {{
   "is_student_thread": true/false,
   "item": {{
-    "student_name": "홍길동",                // 없으면 ""
-    "student_id": "20231234",               // 8자리 없으면 ""
+    "student_name": "홍길동",
+    "student_id": "20231234",
     "category_code": "CF10",
     "student_request_summary": "...",
     "prof_reply_summary": "..."
@@ -289,10 +343,10 @@ category_code 규칙:
 # ======================================================
 # 시간 계산
 # ======================================================
-def round_30(dt: datetime) -> datetime:
-    total = dt.hour * 60 + dt.minute
+def round_30(dt_: datetime) -> datetime:
+    total = dt_.hour * 60 + dt_.minute
     rounded = 30 * round(total / 30)
-    return dt.replace(
+    return dt_.replace(
         hour=(rounded // 60) % 24,
         minute=rounded % 60,
         second=0,
@@ -309,17 +363,17 @@ def save_to_excel(records: List[Dict[str, Any]]):
 
     for r in records:
         ws.append([
-            r.get("학번", ""),                 # 학번(빈칸 허용)
-            r.get("성명", ""),                 # 성명(필수)
-            COUNSEL_TYPE_DEFAULT,              # 상담형태 기본값 "3"(텍스트)
+            r.get("학번", ""),
+            r.get("성명", ""),
+            COUNSEL_TYPE_DEFAULT,
             r.get("상담일", ""),
             r.get("상담시작시간", ""),
             r.get("상담종료시간", ""),
             r.get("상담유형", "CF08"),
-            "",                                 # 장소(비필수)
+            "",
             r.get("학생상담신청내용", ""),
             r.get("교수답변내용", ""),
-            PUBLIC_YN_DEFAULT,                  # "Y"
+            PUBLIC_YN_DEFAULT,
         ])
 
     wb.save(OUTPUT_XLSX)
@@ -329,36 +383,33 @@ def save_to_excel(records: List[Dict[str, Any]]):
 # ======================================================
 # 스레드 처리 (병렬 작업 단위)
 # ======================================================
+OPENAI_API_KEY = ""  # main에서 결정해 주입
+
 def process_thread(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     subject = task["subject"]
     msgs = task["msgs"]
 
-    # (A) 교수 메시지 존재 확인 (답변 기준 시간 산정용)
     prof_msgs = [m for m in msgs if is_prof_message(m["from"]) and (m.get("body") or "").strip()]
     if not prof_msgs:
         return None
 
-    # (B) 학생 메시지 존재 확인: 교수 아닌 발신자의 본문 메시지 최소 1개
     student_msgs = [m for m in msgs if (not is_prof_message(m["from"])) and (m.get("body") or "").strip()]
     if not student_msgs:
-        return None  # 학생 미참여(교수만 보냄) 제외
+        return None
 
-    # 상담시간: "가장 이른 교수 답장" 기준
     rep = min(prof_msgs, key=lambda x: x["internal_ms"])
     start = round_30(ms_to_kst(rep["internal_ms"]))
     end = start + timedelta(minutes=30)
 
-    # 학번: 이메일 우선(학생 메시지 발신자에서)
     sid_email = ""
     for m in student_msgs:
         sid_email = extract_student_id_from_email(m["from"])
         if sid_email:
             break
 
-    client = OpenAI()
+    client = OpenAI(api_key=OPENAI_API_KEY)
     result = call_llm_json(client, build_prompt(subject, msgs))
 
-    # (C) 라벨 오지정 검증: 학생 상담 아니면 제외
     if not bool(result.get("is_student_thread")):
         return None
 
@@ -368,9 +419,8 @@ def process_thread(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     name = str(item.get("student_name", "")).strip()
     if not name:
-        return None  # 이름 없으면 제외(요구사항)
+        return None
 
-    # 학번: 이메일이 최우선, 없으면 LLM값 사용(둘 중 하나만 성공해도 활용)
     sid_llm = normalize_student_id_from_llm(item.get("student_id", ""))
     sid = sid_email if sid_email else sid_llm
 
@@ -380,7 +430,7 @@ def process_thread(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if is_bad_summary(student_sum) or is_bad_summary(prof_sum):
         return None
     if not prof_sum:
-        return None  # 답변 없으면 상담 아님(요구사항)
+        return None
 
     code = str(item.get("category_code", "CF08")).strip()
     if code not in VALID_CODES:
@@ -399,15 +449,97 @@ def process_thread(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 # ======================================================
-# 메인 + 진행 로그
+# 메인 + 진행 로그 (현재 로직 유지 + 기능 복구)
 # ======================================================
 def main():
+    global PERIOD, PROF_EMAIL, LABEL_NAME, OPENAI_API_KEY, PRIMARY_MODEL
+
+    class MyHelpFormatter(argparse.HelpFormatter):
+        def __init__(self, prog):
+            super().__init__(prog, max_help_position=40, width=100)
+
+    ap = argparse.ArgumentParser(formatter_class=MyHelpFormatter)
+    ap.add_argument("--period", help="대상 기간. (e.g., --period \"after:2025/01/01 before:2025/12/31\")")
+    ap.add_argument("--prof-email", help="교수자 이메일. (e.g., --prof-email \"jwpark12@sungshin.ac.kr\")", default=None)
+    ap.add_argument("--openai-api-key", help="OpenAI API Key. (e.g., --openai-api-key \"sk-proj-XXXXXXXXXXXXXX\")", default=None)
+    ap.add_argument("--label-name", help="대상 이메일 라벨. (e.g., --label-name \"student\")", default=None)
+    ap.add_argument("--model", help="사용할 OpenAI 모델. (e.g., --model \"gpt-5-mini\")", default=None)
+    ap.add_argument("--list-models", action="store_true", help="사용 가능한 OpenAI 모델 목록 출력")
+    args = ap.parse_args()
+
+    cfg = load_config()
+
+    # 1) OpenAI API Key 결정 (period 없어도 설정 가능)
+    OPENAI_API_KEY = (
+        (args.openai_api_key or "").strip()
+        or (os.environ.get("OPENAI_API_KEY", "") or "").strip()
+        or (cfg.get("openai_api_key", "") or "").strip()
+    )
+
+    # 모델 목록 출력
+    if args.list_models:
+        if not OPENAI_API_KEY:
+            ap.error("--list-models에는 OpenAI API Key가 필요합니다. (--openai-api-key 또는 OPENAI_API_KEY)")
+        print_available_models(OPENAI_API_KEY)
+        return
+
+    # 2) config 갱신(Period 없이도 가능)
+    LABEL_NAME = (args.label_name.strip() if args.label_name is not None else cfg.get("label_name", "student")).strip()
+    if not LABEL_NAME:
+        LABEL_NAME = "student"
+
+    PROF_EMAIL = (args.prof_email.strip() if args.prof_email is not None else cfg.get("prof_email", "")).strip()
+
+    requested_model = (args.model.strip() if args.model is not None else cfg.get("primary_model", "gpt-5-mini")).strip()
+    if not requested_model:
+        requested_model = "gpt-5-mini"
+
+    # 3) 모델 검증 (키 있을 때만)
+    if OPENAI_API_KEY:
+        available_models = get_available_models(OPENAI_API_KEY)
+        if requested_model not in available_models:
+            print("[ERROR] 요청한 모델을 사용할 수 없습니다:", requested_model)
+            print("\n사용 가능한 모델:")
+            for m in available_models:
+                print(" ", m)
+            sys.exit(1)
+
+    PRIMARY_MODEL = requested_model
+
+    # 4) config 저장 (키/이메일/라벨/모델)
+    if OPENAI_API_KEY:
+        cfg["openai_api_key"] = OPENAI_API_KEY
+    cfg["label_name"] = LABEL_NAME
+    cfg["prof_email"] = PROF_EMAIL
+    cfg["primary_model"] = PRIMARY_MODEL
+    save_config(cfg)
+
+    print("[CONFIG] saved:")
+    print(f"  label_name     = {LABEL_NAME}")
+    print(f"  prof_email     = {PROF_EMAIL or '(empty)'}")
+    print(f"  primary_model  = {PRIMARY_MODEL}")
+    print(f"  openai_api_key = {'set' if OPENAI_API_KEY else 'not set'}")
+
+    # 5) config 완성 여부
+    config_complete = bool(cfg.get("openai_api_key") and cfg.get("prof_email") and cfg.get("primary_model"))
+    if not config_complete:
+        print("[INFO] 설정이 아직 완성되지 않았습니다. (period 없이 종료)")
+        print("       필요한 항목: openai_api_key, prof_email, primary_model")
+        return
+
+    # 6) 실행 모드: period 필수
+    PERIOD = (args.period or "").strip()
+    if not PERIOD:
+        ap.error("설정이 완료되었으므로 실제 실행에는 --period가 필요합니다.")
+
+    print(f"[CONFIG] period='{PERIOD}' (not saved)")
+
+    # 7) Gmail 처리 + 기존 로직 복구
     service = authenticate_gmail()
     threads = get_threads(service, LABEL_NAME, PERIOD)
     total = len(threads)
     print(f"[INFO] threads matched query: {total}")
 
-    # 1) Gmail에서 스레드 메시지 수집 (진행 로그)
     prepared: List[Dict[str, Any]] = []
     for i, t in enumerate(threads, 1):
         subject, msgs = get_thread_messages(service, t["id"])
@@ -428,7 +560,6 @@ def main():
 
     print(f"[INFO] fetched threads: {len(prepared)}. start LLM with {MAX_WORKERS} workers")
 
-    # 2) 병렬 처리 + 진행 로그
     records: List[Dict[str, Any]] = []
     lock = threading.Lock()
     done_count = 0
@@ -458,11 +589,9 @@ def main():
             if done_count % 10 == 0 or done_count == total:
                 log(f"[PROGRESS] done {done_count}/{total}, rows={len(records)}")
 
-    # 3) 엑셀 저장
     save_to_excel(records)
     print(f"[DONE] rows appended: {len(records)}")
 
 
 if __name__ == "__main__":
     main()
-

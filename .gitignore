@@ -1,2 +1,7 @@
+config.json
+token.json
 credentials.json
 output.xlsx
+.venv/
+venv/
+env/

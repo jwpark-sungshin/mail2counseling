@@ -8,6 +8,17 @@ OpenAI API(유료)를 이용해 상담 내용을 요약하고, 학교 상담 시
 
 ---
 
+## 주요 기능
+
+- 지정 기간에 대한 Gmail 라벨 기반 상담 메일 자동 수집
+- 학생–교수 상담 여부 자동 판별
+- 학생 요청 / 교수 답변 요약
+- 상담유형 자동 분류 (학교 코드 체계 대응)
+- 엑셀 업로드 양식 자동 생성
+- 설정/인증 정보 **프로젝트 디렉터리 내 저장** (self-contained)
+
+---
+
 ## 먼저 알아야 할 것 (필수)
 
 ### 1️⃣ OpenAI 계정 + 크레딧 필요
@@ -28,12 +39,12 @@ OpenAI API(유료)를 이용해 상담 내용을 요약하고, 학교 상담 시
 > 메일 길이와 모델에 따라 실제 비용은 달라질 수 있으나,  
 > 일반적인 교수–학생 상담 메일 기준으로는 비용 부담이 매우 낮습니다.
 
----
 
 ### 2️⃣ 개인정보 처리
 
-- Gmail 메일 수집, 분류, 엑셀 저장은 **교수 개인 PC**(**로컬 환경**)에서 수행됩니다.
-- 메일 본문 내용은 **요약 및 분류를 위해 OpenAI API로 전송**됩니다.
+- Gmail 메일 수집과 엑셀 파일 생성은 **교수 개인 PC**(**로컬 환경**)에서 수행되며,
+  **교수가 직접 라벨링한 메일만을 대상으로** 처리합니다.
+- 라벨이 지정된 메일의 본문 내용은 **상담 여부 판별·요약·분류를 위해 OpenAI API로 전송**됩니다.
 - OpenAI API는 요청 처리를 위해 텍스트를 일시적으로 처리하며,
   본 프로그램은 별도의 외부 서버나 데이터베이스에 메일을 저장하지 않습니다.
 
@@ -41,16 +52,6 @@ OpenAI API(유료)를 이용해 상담 내용을 요약하고, 학교 상담 시
 - 메일 내용이 외부 API(OpenAI)로 전송되는 것이 부담되는 경우,
   본 도구 사용을 권장하지 않습니다.
 
----
-
-## 주요 기능
-
-- 지정 기간에 대한 Gmail 라벨 기반 상담 메일 자동 수집
-- 학생–교수 상담 여부 자동 판별
-- 학생 요청 / 교수 답변 요약
-- 상담유형 자동 분류 (학교 코드 체계 대응)
-- 엑셀 업로드 양식 자동 생성
-- 설정/인증 정보 **프로젝트 디렉터리 내 저장** (self-contained)
 
 ---
 
@@ -67,9 +68,113 @@ mail2counseling/
 └─ .gitignore
 ```
 
+---
+
 ## 사전 준비
 
-### 1️⃣ Gmail 라벨링 (필수)
+### 1️⃣ 저장소 클론
+
+먼저 이 저장소를 로컬 환경으로 복사합니다.
+
+```bash
+git clone https://github.com/jwpark-sungshin/mail2counseling.git
+cd mail2counseling
+```
+
+
+### 2️⃣ Python
+
+Python 3.10 이상 권장
+
+    python --version
+
+
+### 3️⃣ 필수 패키지 설치
+
+가상환경 사용을 권장합니다.
+
+    python -m venv .venv
+    source .venv/bin/activate
+    pip install openai openpyxl google-api-python-client google-auth google-auth-oauthlib
+
+
+### 4️⃣ OpenAI 계정 및 API Key 생성
+
+이 도구는 상담 메일 요약을 위해 **OpenAI API(유료)**를 사용합니다.  
+따라서 OpenAI 계정 생성과 API Key 발급이 필요합니다.
+
+#### A. OpenAI 계정 생성
+- https://platform.openai.com 접속
+- Google 계정 또는 이메일로 회원가입
+
+#### B. 결제 수단 등록 및 크레딧 충전
+
+OpenAI API 사용을 위해 **결제 수단 등록과 크레딧 충전이 필요**합니다.
+
+1. OpenAI 결제 페이지 접속  
+   https://platform.openai.com/account/billing
+
+2. **Payment methods** 메뉴에서
+   - 신용카드 또는 체크카드 등록
+
+3. **Add funds** 또는 **Billing overview**에서 크레딧 충전
+   - 최소 충전 금액: **$5**
+
+#### C. OpenAI API Key 생성
+1. https://platform.openai.com/api-keys 접속
+2. **Create new secret key** 클릭
+3. 생성된 키(`sk-...`)를 복사하여 안전하게 보관
+
+⚠️ API Key는 다시 확인할 수 없으므로 반드시 복사해 두세요.
+
+⚠️ API Key는 개인 인증 정보이므로 외부에 공유하거나 Git에 커밋하지 마세요.
+
+
+### 5️⃣ Google OAuth 설정 (credentials.json 만들기)
+
+⚠️ 중요  
+OAuth Client는 반드시 Desktop app 타입이어야 합니다.  
+
+#### A. GCP 프로젝트 생성 / 선택
+
+- Google Cloud Console 접속 (https://console.cloud.google.com/)
+- 상단 프로젝트 선택 → 새 프로젝트 생성 또는 기존 프로젝트 선택
+
+
+#### B. Gmail API 활성화
+
+- APIs & Services → Library
+- Gmail API 검색 → Enable
+
+
+#### C. OAuth 동의 화면 설정
+
+- APIs & Services → OAuth consent screen
+- User Type 선택
+  - Google Workspace 계정이면 보통 Internal
+  - 불가하면 External
+- App name 등 최소 항목 입력 후 저장
+
+
+#### D. OAuth Client ID 생성
+
+- APIs & Services → Credentials
+- Create Credentials → OAuth client ID
+- Application type: Desktop app
+- Name 입력 (예: mail2counseling)
+- Create
+
+
+#### E. credentials.json 다운로드
+
+- 생성된 OAuth Client의 Download JSON 클릭
+- 파일명을 credentials.json으로 변경
+- 프로젝트 루트 디렉터리에 위치
+
+      mail2counseling/credentials.json
+
+
+### 6️⃣ Gmail 라벨링 (필수)
 
 이 도구는 **Gmail 라벨이 붙은 메일만 처리**합니다.  
 따라서 **학생과의 상담 메일에 라벨을 먼저 붙이는 작업이 필요**합니다.
@@ -100,76 +205,8 @@ mail2counseling/
 즉, 라벨은 *대략적인 후보 추리기* 용도로만 사용됩니다.
    
 
-### 2️⃣ 저장소 클론
 
-먼저 이 저장소를 로컬 환경으로 복사합니다.
-
-```bash
-git clone https://github.com/jwpark-sungshin/mail2counseling.git
-cd mail2counseling
-```
-
-
-### 3️⃣ Python
-
-Python 3.10 이상 권장
-
-    python --version
-
-
-### 4️⃣ 필수 패키지 설치
-
-가상환경 사용을 권장합니다.
-
-    python -m venv .venv
-    source .venv/bin/activate
-    pip install openai openpyxl google-api-python-client google-auth google-auth-oauthlib
-
-
-## Google OAuth 설정 (credentials.json 만들기)
-
-⚠️ 중요  
-OAuth Client는 반드시 Desktop app 타입이어야 합니다.  
-
-### A. GCP 프로젝트 생성 / 선택
-
-- Google Cloud Console 접속 (https://console.cloud.google.com/)
-- 상단 프로젝트 선택 → 새 프로젝트 생성 또는 기존 프로젝트 선택
-
-
-### B. Gmail API 활성화
-
-- APIs & Services → Library
-- Gmail API 검색 → Enable
-
-
-### C. OAuth 동의 화면 설정
-
-- APIs & Services → OAuth consent screen
-- User Type 선택
-  - Google Workspace 계정이면 보통 Internal
-  - 불가하면 External
-- App name 등 최소 항목 입력 후 저장
-
-
-### D. OAuth Client ID 생성
-
-- APIs & Services → Credentials
-- Create Credentials → OAuth client ID
-- Application type: Desktop app
-- Name 입력 (예: mail2counseling)
-- Create
-
-
-### E. credentials.json 다운로드
-
-- 생성된 OAuth Client의 Download JSON 클릭
-- 파일명을 credentials.json으로 변경
-- 프로젝트 루트 디렉터리에 위치
-
-      mail2counseling/credentials.json
-      mail2counseling/m2c.py
-
+---
 
 ## 기본 사용 흐름
 
@@ -238,6 +275,14 @@ OpenAI API Key가 먼저 설정되어 있어야 합니다.
 - 이후에는 token.json을 재사용하여 자동 로그인
 - 결과 파일: output.xlsx
 
+#### Gmail 검색 기간 (--period) 예시
+
+Gmail search query 형식을 그대로 사용합니다.
+
+    after:2025/01/01 before:2025/12/31
+    after:2025/03/01
+    before:2025/06/30
+
 #### ⚠️ 학번 누락 안내 (중요)
 
 생성된 `output.xlsx`에서 **학번이 비어 있는 행이 있을 수 있습니다.**
@@ -250,14 +295,8 @@ OpenAI API Key가 먼저 설정되어 있어야 합니다.
 
 ⚠️ 학번이 비어 있는 상태로는 학교 상담 시스템 업로드가 정상적으로 되지 않을 수 있으니 반드시 확인하세요.
 
-## Gmail 검색 기간 (--period) 예시
 
-Gmail search query 형식을 그대로 사용합니다.
-
-    after:2025/01/01 before:2025/12/31
-    after:2025/03/01
-    before:2025/06/30
-
+---
 
 ## config.json 설명
 
@@ -271,6 +310,7 @@ config.json 파일을 직접 수정하는 것도 가능합니다.
       "primary_model": "gpt-5-mini"
     }
 
+---
 
 ## 문제 해결
 

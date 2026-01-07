@@ -173,23 +173,52 @@ OAuth Client는 반드시 Desktop app 타입이어야 합니다.
 
 ## 기본 사용 흐름
 
+### 0️⃣ m2c.py 사용법
+
+이 프로그램은 커맨드라인(CLI)에서 실행합니다.
+
+    usage: m2c.py [-h] 
+                  [--period PERIOD] 
+                  [--prof-email PROF_EMAIL] 
+                  [--openai-api-key OPENAI_API_KEY] 
+                  [--label-name LABEL_NAME] 
+                  [--model MODEL] 
+                  [--list-models]
+
+- `-h`, `--help`: 도움말 출력
+
+- `--period PERIOD`: Gmail 검색 기간 (실제 실행 시 필수)  
+  예: `--period "after:2025/01/01 before:2025/12/31"`
+
+- `--prof-email PROF_EMAIL`: 교수자 이메일 주소  
+  예: `--prof-email "abc123@sungshin.ac.kr"`
+
+- `--openai-api-key OPENAI_API_KEY`: OpenAI API Key  
+  예: `--openai-api-key "sk-proj-XXXXXXXXXXXXXX"`
+
+- `--label-name LABEL_NAME`: 처리할 Gmail 라벨명 (기본값: `student`)
+
+- `--model MODEL`: 사용할 OpenAI 모델 (기본값: `gpt-5-mini`)
+
+- `--list-models`: 사용 가능한 OpenAI 모델 목록 출력
+
 ### 1️⃣ 최초 설정 (실행 없이 설정만)
 
 OpenAI API Key 저장
 
-    python m2c.py --openai-api-key sk-xxxxxxxx
+    python m2c.py --openai-api-key "sk-xxxxxxxx"
 
 교수 이메일 저장
 
-    python m2c.py --prof-email abc123@sungshin.ac.kr
+    python m2c.py --prof-email "abc123@sungshin.ac.kr"
 
 Gmail 라벨 설정 (기본값: student)
 
-    python m2c.py --label-name student
+    python m2c.py --label-name "student"
 
 OpenAI 모델 설정
 
-    python m2c.py --model gpt-5-mini
+    python m2c.py --model "gpt-5-mini"
 
 
 ### 2️⃣ 사용 가능한 OpenAI 모델 확인
@@ -232,7 +261,8 @@ Gmail search query 형식을 그대로 사용합니다.
 
 ## config.json 설명
 
-자동 생성되며 프로젝트 디렉터리에 저장됩니다.
+자동 생성되며 프로젝트 디렉터리에 저장됩니다. 
+config.json 파일을 직접 수정하는 것도 가능합니다.
 
     {
       "label_name": "student",
@@ -240,8 +270,6 @@ Gmail search query 형식을 그대로 사용합니다.
       "openai_api_key": "sk-...",
       "primary_model": "gpt-5-mini"
     }
-
-- period는 저장하지 않으며 항상 인자로 입력
 
 
 ## 문제 해결
